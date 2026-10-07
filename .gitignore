@@ -1,0 +1,39 @@
+# Data
+data/
+dataset/
+datasets/
+*.csv
+*.zip
+*.tar
+*.tar.gz
+*.npy
+*.npz
+
+# Modelos y checkpoints
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.onnx
+models/*.pth
+models/*.pt
+checkpoints/
+runs/
+wandb/
+lightning_logs/
+
+# Entornos
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Notebooks
+.ipynb_checkpoints/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
