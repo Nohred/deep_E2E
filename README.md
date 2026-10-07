@@ -1,155 +1,97 @@
-# MNIST Deep Learning
+# Clasificación y localización con ConvDetector
 
-Proyecto de reconocimiento de digitos escritos a mano del dataset MNIST usando PyTorch. Incluye entrenamiento de una CNN, exportacion a ONNX y despliegue del modelo con NVIDIA Triton Inference Server para realizar inferencias por lotes.
+Este proyecto entrena un `ConvDetector` para **un objeto por imagen** con
+Pascal VOC 2012. No es un detector multiobjeto: no usa anchors, NMS ni
+recortes diferenciables. Los objetos no seleccionados no se evalúan en este
+baseline.
 
-## Flujo del proyecto
+## Datos y selección del objeto
 
-1. Descargar/cargar MNIST y entrenar la CNN.
-2. Guardar los pesos entrenados en `artifacts/best_model.pth`.
-3. Exportar y validar el modelo en formato ONNX.
-4. Servir el modelo con Triton mediante Docker Compose.
-5. Enviar un batch de imagenes y validar las predicciones.
+Se usan las anotaciones de detección XML en
+`data/VOCdevkit/VOC2012/Annotations` y los splits oficiales
+`ImageSets/Main/train.txt` y `val.txt`. Se excluyen objetos `difficult`, nombres
+fuera de las 20 categorías VOC y cajas degeneradas. En imágenes con varios
+objetos se selecciona el objeto elegible de mayor área; los empates conservan
+el orden del XML. El dataset informa los conteos incluidos y excluidos de cada
+split.
 
-## Estructura
+Las clases, en orden estable e índices `0..19`, son:
+`aeroplane, bicycle, bird, boat, bottle, bus, car, cat, chair, cow,
+diningtable, dog, horse, motorbike, person, pottedplant, sheep, sofa, train,
+tvmonitor`.
+
+VOC almacena cajas 1-based e inclusivas. Se convierten una sola vez a
+coordenadas 0-based semiabiertas `[xmin, ymin, xmax, ymax]`, se redimensionan
+y se normalizan por `(width, height)`. Las imágenes se convierten con
+`to_tensor`, por lo que son `float32` en `[0, 1]`; no se aplica normalización
+ImageNet.
+
+## Flujo y contrato
 
 ```text
-.
-├── artifacts/
-│   └── best_model.pth              # Pesos del modelo entrenado
-├── callbacks/
-│   └── early_stopping.py           # Early stopping
-├── data/MNIST/                     # Datos de MNIST
-├── datasets/main.py                # DataLoaders y preprocesamiento
-├── engine/trainer.py               # Entrenamiento y evaluacion
-├── models/
-│   ├── base.py                     # Clase base
-│   ├── cnn.py                      # CNN usada en el despliegue
-│   ├── mlp.py                      # Modelo MLP alternativo
-│   ├── vgg.py                      # Modelo VGG alternativo
-│   └── factory.py                  # Fabrica de modelos
-├── serving/
-│   ├── export_cnn_onnx.py          # Exportacion y validacion ONNX
-│   └── model_repository/cnn/       # Repositorio de modelos de Triton
-├── test_inference.py               # Prueba de inferencia batch
-├── test.bash                       # Pruebas simples de disponibilidad
-├── train.py                        # Punto de entrada del entrenamiento
-├── docker-compose.yml              # Servicio de Triton
-└── README.md
+VOC XML + JPEG
+    -> dataset selecciona un objeto
+    -> [B,3,H,W] float32, [B] long, [B,4] float32 normalizado
+    -> extractor convolucional compartido
+       -> cabeza lineal de caja [B,4]
+       -> cabeza lineal de clasificación [B,20] (logits)
 ```
 
-## Requisitos
+`model(images)` devuelve `(pred_boxes, class_logits)`. La cabeza de caja es
+lineal y no garantiza cajas válidas. `CrossEntropyLoss` recibe logits
+directamente; `softmax` y `argmax` sólo se usan para scores y métricas.
 
-- Python 3.11 o superior
-- Docker y Docker Compose
-- Al menos 2 GB de espacio para MNIST, dependencias y la imagen de Triton
-- GPU NVIDIA y NVIDIA Container Toolkit son opcionales. Sin ellos, Triton funciona usando CPU.
+La pérdida es:
 
-## Instalacion
-
-Se recomienda usar un entorno virtual o Conda. Desde la raiz del proyecto:
-
-```bash
-conda create -n deeplearning python=3.11 -y
-conda activate deeplearning
-python -m pip install torch torchvision numpy matplotlib onnx onnxruntime "tritonclient[http]"
+```text
+loss_total = CrossEntropyLoss(class_logits, labels)
+             + LAMBDA_BOX * SmoothL1Loss(pred_boxes, target_boxes)
 ```
 
-El extra `http` es necesario porque el cliente de Triton HTTP usa dependencias adicionales como `gevent`.
+`LAMBDA_BOX` comienza en `1.0` y está declarado en `train.py`. Ambas pérdidas
+actualizan la cabeza correspondiente y el extractor compartido. Scheduler y
+early stopping monitorizan la pérdida total de validación. El mejor estado se
+restaura antes de guardarlo.
 
-Para comprobar el cliente:
+El IoU de entrenamiento/validación recorta predicciones a `[0,1]` sólo para la
+métrica, no para la pérdida. No intercambia esquinas: una caja invertida o
+degenerada obtiene IoU cero. También se registra `invalid_box_rate`. El IoU
+evalúa la localización del objeto seleccionado independientemente de acertar
+su clase.
 
-```bash
-python -c "import torch, torchvision, onnx, onnxruntime, tritonclient.http; print('Dependencias OK')"
-```
+## Ejecución
 
-## Entrenamiento
-
-El script entrena la CNN, descarga MNIST si es necesario y guarda los pesos en `artifacts/best_model.pth`:
+Desde la raíz, con PyTorch, torchvision, NumPy y Matplotlib instalados:
 
 ```bash
 python train.py
 ```
 
-El entrenamiento usa normalizacion MNIST con media `0.1307` y desviacion `0.3081`. Si se cambia el modelo o sus pesos, se debe volver a ejecutar la exportacion ONNX antes de iniciar Triton.
+Variables editables en `train.py`: `batch_size`, `image_size`,
+`learning_rate`, `num_epochs`, `patience`, `min_delta`, `weight_decay`,
+`lambda_box` y `data_dir`. No se ejecuta un split aleatorio adicional.
 
-## Exportar a ONNX
+Se generan:
 
-Con los pesos disponibles en `artifacts/best_model.pth`:
+- `artifacts/best_detector.pth`: pesos y metadatos (`num_classes`, clases,
+  formato/normalización de cajas, tamaño y rango de imagen, historial y mejor
+  pérdida).
+- `artifacts/detector_metadata.json`: metadatos legibles.
+- `artifacts/history.png`: pérdidas total, clasificación y localización.
+- `artifacts/validation_detection.png`: cajas reales verdes y predichas rojas.
 
-```bash
-python serving/export_cnn_onnx.py
-```
+Para inferencia, reconstruir `ConvDetector(num_classes=checkpoint["num_classes"])`
+y cargar `checkpoint["model_state_dict"]` con `torch.load(..., map_location=...)`.
+El checkpoint es distinto de cualquier peso heredado de U-Net.
 
-El archivo generado es:
+## Módulos relevantes
 
-```text
-serving/model_repository/cnn/1/model.onnx
-```
+- `datasets/voc.py`: lectura XML, política de selección, transformación y loaders.
+- `models/dect.py`: extractor convolucional y dos cabezas paralelas.
+- `engine/trainer.py`: entrenamiento, validación, pérdidas y métricas.
+- `callbacks/early_stopping.py`: guarda/restaura el mejor estado.
+- `utils/plotting.py`: historial y visualización de detección.
+- `utils/device.py`: selección de CPU/GPU.
 
-El script tambien compara la salida de PyTorch con la salida de ONNX. La exportacion ajusta la version IR del archivo para que sea compatible con Triton 23.06.
-
-## Levantar Triton
-
-Inicia el servidor desde la raiz del proyecto:
-
-```bash
-docker compose up -d
-```
-
-Comprobar el estado del servidor y del modelo:
-
-```bash
-curl http://localhost:8000/v2/health/ready
-curl http://localhost:8000/v2/models/cnn/ready
-```
-
-Ambos comandos deben responder con HTTP `200`. Para ver los logs:
-
-```bash
-docker compose logs -f triton
-```
-
-Para detener el servidor:
-
-```bash
-docker compose down
-```
-
-El servicio expone:
-
-- HTTP: `localhost:8000`
-- gRPC: `localhost:8001`
-- Metricas: `localhost:8002`
-
-## Inferencia por batches
-
-Con Triton ejecutandose, envia 10 imagenes de MNIST en una sola peticion HTTP:
-
-```bash
-python test_inference.py
-```
-
-El resultado muestra la forma del batch, la forma de salida, predicciones, etiquetas, confianza y accuracy. La forma esperada es:
-
-```text
-Sent batch: (10, 1, 28, 28)
-Received output: (10, 10)
-```
-
-Cambiar el tamano del batch:
-
-```bash
-python test_inference.py --batch-size 32
-```
-
-El modelo acepta hasta 32 imagenes por batch segun `config.pbtxt`. Tambien se pueden cambiar la URL, el nombre del modelo y la carpeta de datos:
-
-```bash
-python test_inference.py \
-  --url localhost:8000 \
-  --model-name cnn \
-  --data-dir data/MNIST \
-  --batch-size 10
-```
-
-
+Los módulos heredados de MNIST, ONNX, Triton y GUI no forman parte de este
+flujo y no fueron adaptados en este cambio.

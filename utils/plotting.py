@@ -1,138 +1,80 @@
+from pathlib import Path
+
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import numpy as np
-
-# history = {
-#         "train_loss": [],
-#         "val_loss": [],
-#         "learning_rate": []
-#     }
-
-def plot_segmentation(
-    images,
-    masks,
-    predictions,
-):
-    num_images = len(images)
-
-    fig, axes = plt.subplots(
-        3,
-        num_images,
-        figsize=(4 * num_images, 10),
-    )
-
-    if num_images == 1:
-        axes = axes.reshape(3, 1)
-
-    cmap = plt.get_cmap(
-        "tab20",
-        21,
-    ).copy()
-
-    cmap.set_bad("gray")
-
-    for i in range(num_images):
-        image = images[i].permute(
-            1,
-            2,
-            0,
-        )
-
-        axes[0, i].imshow(image)
-        axes[0, i].axis("off")
-
-        mask = masks[i].cpu().numpy()
-        mask = np.ma.masked_where(
-            mask == 255,
-            mask,
-        )
-
-        axes[1, i].imshow(
-            mask,
-            cmap=cmap,
-            vmin=0,
-            vmax=20,
-        )
-
-        axes[1, i].axis("off")
-
-        axes[2, i].imshow(
-            predictions[i].cpu(),
-            cmap=cmap,
-            vmin=0,
-            vmax=20,
-        )
-
-        axes[2, i].axis("off")
-
-    axes[0, 0].set_ylabel("Imagen")
-    axes[1, 0].set_ylabel("Real")
-    axes[2, 0].set_ylabel("Predicción")
-
-    plt.tight_layout()
-    plt.show()
-       
-
-def plot_history( history,
-                ):
-    epochs = range(1, len(history['train_loss']) + 1)
-
-    fig, (ax, lr_ax) = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
-    ax.plot(
-        epochs,
-        history['train_loss'],
-        label='Training loss',
-        color='#2563eb',
-        linewidth=2.5,
-        marker='o',
-        markersize=4,
-    )
-
-    if 'val_loss' in history:
-        ax.plot(
-            epochs,
-            history['val_loss'],
-            label='Validation loss',
-            color='#dc2626',
-            linewidth=2.5,
-            marker='o',
-            markersize=4,
-        )
-
-    ax.set_title('Model Loss', fontsize=16, fontweight='bold', pad=12)
-    ax.set_xlabel('Epoch')
-    ax.set_ylabel('Loss')
-    ax.set_xticks(list(epochs))
-    ax.grid(True, linestyle='--', alpha=0.3)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.legend(frameon=False)
-    ax.set_facecolor('#f8fafc')
+import torch
 
 
-    lr_ax.plot(
-        epochs,
-        history['learning_rate'],
-        label='Learning rate',
-        color='#16a34a',
-        linewidth=2.5,
-        marker='o',
-        markersize=4,
-    )
-    lr_ax.set_yscale('log')  # Set y-axis to logarithmic scale for better visualization
-    lr_ax.set_title('Learning Rate', fontsize=16, fontweight='bold', pad=12)
-    lr_ax.set_xlabel('Epoch')
-    lr_ax.set_ylabel('Learning rate')
-    lr_ax.set_xticks(list(epochs))
-    lr_ax.grid(True, linestyle='--', alpha=0.3)
-    lr_ax.spines['top'].set_visible(False)
-    lr_ax.spines['right'].set_visible(False)
-    lr_ax.legend(frameon=False)
-    lr_ax.set_facecolor('#f8fafc')
+def plot_detection(images, real_boxes, real_classes, pred_boxes, pred_classes,
+                   class_names, scores=None, max_images=4, save_path=None):
+    count = min(max_images, len(images))
+    if count == 0:
+        raise ValueError("No hay imágenes para visualizar.")
+    fig, axes = plt.subplots(1, count, figsize=(5 * count, 5), squeeze=False)
+    for i in range(count):
+        image = images[i].detach().cpu().permute(1, 2, 0).numpy()
+        height, width = image.shape[:2]
+        axis = axes[0, i]
+        axis.imshow(np.clip(image, 0, 1))
+        axis.axis("off")
 
-    fig.patch.set_facecolor('white')
+        def draw_box(box, color, label):
+            box = box.detach().cpu().float()
+            valid = box.shape == (4,) and torch.isfinite(box).all() and box[2] > box[0] and box[3] > box[1]
+            if not valid:
+                axis.text(0.02, 0.95, f"{label}: caja inválida", transform=axis.transAxes,
+                          color=color, va="top", bbox={"facecolor": "white", "alpha": 0.7})
+                return
+            x1, y1, x2, y2 = (box * torch.tensor([width, height, width, height])).tolist()
+            axis.add_patch(patches.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                              fill=False, edgecolor=color, linewidth=2))
+            axis.text(x1, y1, label, color=color, backgroundcolor="white")
 
-    #show the plot
-    plt.show()
-    return fig, ax
+        draw_box(real_boxes[i], "green", f"Real: {class_names[int(real_classes[i])]}")
+        label = f"Pred: {class_names[int(pred_classes[i])]}"
+        if scores is not None:
+            label += f" ({float(scores[i].detach().cpu()):.2f})"
+        draw_box(pred_boxes[i], "red", label)
+        axis.legend(handles=[
+            patches.Patch(color="green", label="Real"),
+            patches.Patch(color="red", label="Predicción"),
+        ], loc="lower right", framealpha=0.7)
+    fig.tight_layout()
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    return fig
 
-    
+
+def plot_history(history, save_path=None):
+    epochs = range(1, len(history["train_loss"]) + 1)
+    fig, (loss_ax, lr_ax) = plt.subplots(1, 2, figsize=(14, 5), constrained_layout=True)
+    for key, label, color in (
+        ("train_loss", "Train total", "#2563eb"),
+        ("val_loss", "Val total", "#dc2626"),
+        ("train_loss_cls", "Train clasificación", "#7c3aed"),
+        ("val_loss_cls", "Val clasificación", "#a855f7"),
+        ("train_loss_box", "Train localización", "#0891b2"),
+        ("val_loss_box", "Val localización", "#06b6d4"),
+    ):
+        if key in history:
+            loss_ax.plot(epochs, history[key], label=label, linewidth=2)
+    loss_ax.set_title("Pérdidas")
+    loss_ax.set_xlabel("Época")
+    loss_ax.set_ylabel("Loss")
+    loss_ax.grid(True, linestyle="--", alpha=0.3)
+    loss_ax.legend(frameon=False)
+    lr_ax.plot(epochs, history["learning_rate"], label="Learning rate", color="#16a34a", linewidth=2)
+    lr_ax.set_yscale("log")
+    lr_ax.set_title("Learning rate")
+    lr_ax.set_xlabel("Época")
+    lr_ax.grid(True, linestyle="--", alpha=0.3)
+    if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+    else:
+        plt.show()
+    return fig, loss_ax

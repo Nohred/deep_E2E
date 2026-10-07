@@ -19,7 +19,8 @@ class ConvBlock(nn.Module):
                 padding=1,
             ),
 
-            nn.ReLU(),
+            # nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.01),
             nn.Conv2d(
                 in_channels=out_channels,
                 out_channels=out_channels,
@@ -27,7 +28,7 @@ class ConvBlock(nn.Module):
                 padding=1,
             ),
 
-            nn.ReLU(),
+            nn.LeakyReLU(negative_slope=0.01)
         )
 
 
@@ -37,7 +38,7 @@ class ConvBlock(nn.Module):
 
 
 class ConvDetector(nn.Module):
-    def __init__(self,num_classes=21):
+    def __init__(self, num_classes=20):
         super(ConvDetector, self).__init__()
 
         self.conv1 = ConvBlock(3, 32)
